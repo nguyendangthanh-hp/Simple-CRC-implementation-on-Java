@@ -20,7 +20,7 @@ public class CrcGui extends JFrame {
     private final JComboBox<String> crcTypeCombo = new JComboBox<>(new String[]{"CRC-8", "CRC-16", "CRC-32", "CRC-64", "Custom CRC"});
     private final JRadioButton lookupOn = new JRadioButton("Yes");
     private final JRadioButton lookupOff = new JRadioButton("No", true);
-    private JPanel notDivByXLight;git commit -m "Initial commit - add CRC GUI code"
+    private JPanel notDivByXLight;
 
     private JPanel divByXPlus1Light;
     private String lastCodeword = "";
