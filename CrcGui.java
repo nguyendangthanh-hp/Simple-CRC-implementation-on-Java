@@ -79,7 +79,6 @@ public class CrcGui extends JFrame {
             customWidthLabel.setVisible(isCustom);
             customWidthField.setVisible(isCustom);
             setDefaultPolynomial(selected);
-            // Kích hoạt kiểm tra đa thức khi thay đổi loại CRC
             String poly = removeWhitespace(divisorField.getText());
             if (!poly.isEmpty()) {
                 String error = validatePoly(poly, getCrcBitWidth(selected));
@@ -158,7 +157,6 @@ public class CrcGui extends JFrame {
             lastCodeword = "";
         });
 
-        // Set tooltips
         notDivByXLight.setToolTipText("Checks if the polynomial is not divisible by x (constant term is 1)");
         divByXPlus1Light.setToolTipText("Checks if the polynomial is divisible by x+1 (even number of 1s)");
 
@@ -168,208 +166,268 @@ public class CrcGui extends JFrame {
     }
 
     // --- CRC Core ---
+
+    /**
+     * Bitwise MSB-first CRC encode.
+     * width: length of polynomial (poly bitstring length), degree = width - 1
+     * poly: polynomial as BigInteger with bit-length width (leading 1 set)
+     */
     private String encodeBitwise(String data, BigInteger poly, int width) {
-        if (data.isEmpty()) {
-        throw new IllegalArgumentException("Input data cannot be empty");
+        if (data == null || data.isEmpty()) {
+            throw new IllegalArgumentException("Input data cannot be empty");
         }
-        BigInteger augmentedData = new BigInteger(data, 2).shiftLeft(width - 1);
+        int degree = width - 1;
+        BigInteger msg = new BigInteger(data, 2).shiftLeft(degree);
         BigInteger divisor = poly;
-        int dataLength = data.length();
-        BigInteger mask = BigInteger.ONE.shiftLeft(width - 1);
-        for (int i = 0; i < dataLength; i++) {
-            if (augmentedData.testBit(dataLength + width - 2 - i)) {
-                augmentedData = augmentedData.xor(divisor.shiftLeft(dataLength + width - 2 - i - (width - 1)));
+        int totalBits = data.length() + degree;
+
+        for (int i = totalBits - 1; i >= degree; i--) {
+            if (msg.testBit(i)) {
+                msg = msg.xor(divisor.shiftLeft(i - degree));
             }
         }
-        BigInteger remainder = augmentedData.mod(BigInteger.ONE.shiftLeft(width - 1));
-        return data + String.format("%" + (width - 1) + "s", remainder.toString(2)).replace(' ', '0');
+
+        BigInteger remainder = msg.and(BigInteger.ONE.shiftLeft(degree).subtract(BigInteger.ONE));
+        String remainderStr = String.format("%" + degree + "s", remainder.toString(2)).replace(' ', '0');
+        return data + remainderStr;
     }
 
+    /**
+     * Lookup (byte-wise) MSB-first encode. Fallback to bitwise if degree < 8.
+     * poly: full polynomial BigInteger.
+     */
     private String encodeLookup(String data, BigInteger poly, int width) {
-        if (data.isEmpty()) {
-        throw new IllegalArgumentException("Input data cannot be empty");
-        }
+        if (data == null || data.isEmpty()) throw new IllegalArgumentException("Input data cannot be empty");
+        int degree = width - 1;
+        if (degree < 8) return encodeBitwise(data, poly, width);
+
         BigInteger[] table = buildCrcTable(poly, width);
+        BigInteger maskFull = BigInteger.ONE.shiftLeft(degree).subtract(BigInteger.ONE);
+
+        String augStr = data; // Fixed: no augment for encode
+        int totalBits = augStr.length();
+        int fullBytes = totalBits / 8;
+
         BigInteger crc = BigInteger.ZERO;
-        int i = 0;
-        while (i < data.length()) {
-            int byteSize = Math.min(8, data.length() - i);
-            BigInteger byteVal = new BigInteger(data.substring(i, i + byteSize), 2);
-            int shift = width - 8;
-            if (byteSize < 8) {
-                shift = width - byteSize;
-                byteVal = byteVal.shiftLeft(8 - byteSize);
-            }
-            int index = crc.shiftRight(shift).xor(byteVal).and(BigInteger.valueOf(255)).intValue();
-            crc = table[index].xor(crc.shiftLeft(8 - (8 - byteSize)));
-            crc = crc.and(BigInteger.ONE.shiftLeft(width).subtract(BigInteger.ONE));
-            i += byteSize;
+        for (int i = 0; i < fullBytes; i++) {
+            String byteStr = augStr.substring(i * 8, (i + 1) * 8);
+            int byteVal = Integer.parseInt(byteStr, 2);
+            int crcTop = crc.shiftRight(degree - 8).and(BigInteger.valueOf(0xFF)).intValue();
+            int index = (crcTop ^ byteVal) & 0xFF;
+            crc = crc.shiftLeft(8).xor(table[index]).and(maskFull);
+            outputArea.append(String.format("Encode - Byte %d: index=%d, crc=%s\n", (i + 1), index, crc.toString(2)));
         }
-        // Pad with zeros if necessary
-        for (int j = 0; j < (width - 1) / 8; j++) {
-            int index = crc.shiftRight(width - 8).and(BigInteger.valueOf(255)).intValue();
-            crc = table[index].xor(crc.shiftLeft(8));
-            crc = crc.and(BigInteger.ONE.shiftLeft(width).subtract(BigInteger.ONE));
-        }
-        int remainingBits = (width - 1) % 8;
+
+        // Fixed: bit-by-bit for remaining bits
+        int remainingBits = totalBits % 8;
         if (remainingBits > 0) {
-            int index = crc.shiftRight(width - remainingBits).and(BigInteger.valueOf((1 << remainingBits) - 1)).intValue();
-            crc = table[index].shiftRight(8 - remainingBits).xor(crc.shiftLeft(remainingBits));
-            crc = crc.and(BigInteger.ONE.shiftLeft(width).subtract(BigInteger.ONE));
+            String remainingStr = augStr.substring(fullBytes * 8);
+            for (int j = 0; j < remainingBits; j++) {
+                int bit = remainingStr.charAt(j) - '0';
+                crc = crc.xor(BigInteger.valueOf(bit).shiftLeft(degree - 1)).and(maskFull);
+                if (crc.testBit(degree - 1)) {
+                    crc = crc.shiftLeft(1).xor(poly).and(maskFull);
+                } else {
+                    crc = crc.shiftLeft(1).and(maskFull);
+                }
+                outputArea.append(String.format("Encode - Bit %d: bit=%d, crc=%s\n", j + 1, bit, crc.toString(2)));
+            }
         }
-        return data + String.format("%" + (width - 1) + "s", crc.toString(2)).replace(' ', '0');
+
+        String remainderStr = String.format("%" + degree + "s", crc.toString(2)).replace(' ', '0');
+        return data + remainderStr;
     }
 
+    /**
+     * Bitwise MSB-first CRC decode.
+     */
     private boolean decodeBitwise(String codeword, BigInteger poly, int width) {
-        if (codeword.isEmpty() || codeword.length() < width - 1) {
-        return false; // Codeword quá ngắn hoặc rỗng, không hợp lệ
-        }
-        BigInteger received = new BigInteger(codeword, 2);
+        if (codeword == null || codeword.isEmpty()) return false;
+        int degree = width - 1;
+        if (codeword.length() < degree) return false;
+
+        BigInteger msg = new BigInteger(codeword, 2);
         BigInteger divisor = poly;
-        int codeLength = codeword.length();
-        for (int i = 0; i < codeLength - (width - 1); i++) {
-            if (received.testBit(codeLength - 1 - i)) {
-                received = received.xor(divisor.shiftLeft(codeLength - 1 - i - (width - 1)));
+        int totalBits = codeword.length();
+
+        for (int i = totalBits - 1; i >= degree; i--) {
+            if (msg.testBit(i)) {
+                msg = msg.xor(divisor.shiftLeft(i - degree)).and(BigInteger.ONE.shiftLeft(totalBits).subtract(BigInteger.ONE));
             }
         }
-        return received.equals(BigInteger.ZERO);
+        BigInteger remainder = msg.and(BigInteger.ONE.shiftLeft(degree).subtract(BigInteger.ONE));
+        outputArea.append("DecodeBitwise remainder: " + remainder.toString(2) + "\n");
+        return remainder.equals(BigInteger.ZERO);
     }
 
+    /**
+     * Lookup (byte-wise) MSB-first decode. Fallback to bitwise if degree < 8.
+     */
     private boolean decodeLookup(String codeword, BigInteger poly, int width) {
-        if (codeword.isEmpty() || codeword.length() < width - 1) {
-        return false; // Codeword quá ngắn hoặc rỗng, không hợp lệ
-        }
+        if (codeword == null || codeword.isEmpty()) return false;
+        int degree = width - 1;
+        if (codeword.length() < degree) return false;
+        if (degree < 8) return decodeBitwise(codeword, poly, width);
+
         BigInteger[] table = buildCrcTable(poly, width);
+        BigInteger maskFull = BigInteger.ONE.shiftLeft(degree).subtract(BigInteger.ONE);
+        String augStr = codeword;
+        int totalBits = augStr.length();
+        int fullBytes = totalBits / 8;
+
         BigInteger crc = BigInteger.ZERO;
-        int i = 0;
-        while (i < codeword.length()) {
-            int byteSize = Math.min(8, codeword.length() - i);
-            BigInteger byteVal = new BigInteger(codeword.substring(i, i + byteSize), 2);
-            int shift = width - 8;
-            if (byteSize < 8) {
-                shift = width - byteSize;
-                byteVal = byteVal.shiftLeft(8 - byteSize);
-            }
-            int index = crc.shiftRight(shift).xor(byteVal).and(BigInteger.valueOf(255)).intValue();
-            crc = table[index].xor(crc.shiftLeft(8 - (8 - byteSize)));
-            crc = crc.and(BigInteger.ONE.shiftLeft(width).subtract(BigInteger.ONE));
-            i += byteSize;
+        for (int i = 0; i < fullBytes; i++) {
+            String byteStr = augStr.substring(i * 8, (i + 1) * 8);
+            int byteVal = Integer.parseInt(byteStr, 2);
+            int crcTop = crc.shiftRight(degree - 8).and(BigInteger.valueOf(0xFF)).intValue();
+            int index = (crcTop ^ byteVal) & 0xFF;
+            crc = crc.shiftLeft(8).xor(table[index]).and(maskFull);
+            outputArea.append(String.format("Decode - Byte %d: index=%d, crc=%s\n", (i + 1), index, crc.toString(2)));
         }
+
+        // Fixed: bit-by-bit for remaining bits
+        int remainingBits = totalBits % 8;
+        if (remainingBits > 0) {
+            String remainingStr = augStr.substring(fullBytes * 8);
+            for (int j = 0; j < remainingBits; j++) {
+                int bit = remainingStr.charAt(j) - '0';
+                crc = crc.xor(BigInteger.valueOf(bit).shiftLeft(degree - 1)).and(maskFull);
+                if (crc.testBit(degree - 1)) {
+                    crc = crc.shiftLeft(1).xor(poly).and(maskFull);
+                } else {
+                    crc = crc.shiftLeft(1).and(maskFull);
+                }
+                outputArea.append(String.format("Decode - Bit %d: bit=%d, crc=%s\n", j + 1, bit, crc.toString(2)));
+            }
+        }
+
+        outputArea.append("DecodeLookup remainder: " + crc.toString(2) + "\n");
         return crc.equals(BigInteger.ZERO);
     }
 
+    /**
+     * Build a 256-entry CRC table for MSB-first (non-reflected) algorithm.
+     * Only for degree >= 8. Poly is full polynomial with leading 1.
+     */
     private BigInteger[] buildCrcTable(BigInteger poly, int width) {
-    if (cachedTable != null && cachedPoly.equals(poly) && cachedWidth == width) {
-        return cachedTable;
-    }
-    if (width < 2) {
-        throw new IllegalArgumentException("CRC width must be at least 2");
-    }
-    BigInteger[] table = new BigInteger[256];
-    BigInteger mask = BigInteger.ONE.shiftLeft(width - 1);
-    BigInteger max = BigInteger.ONE.shiftLeft(width).subtract(BigInteger.ONE);
-    for (int i = 0; i < 256; i++) {
-        BigInteger crc = BigInteger.valueOf(i);
-        if (width >= 8) {
-            crc = crc.shiftLeft(width - 8);
-        } else {
-            crc = crc.shiftRight(8 - width); // Điều chỉnh cho width < 8
+        if (cachedTable != null && Objects.equals(cachedPoly, poly) && cachedWidth == width) {
+            outputArea.append("Using cached lookup table.\n");
+            return cachedTable;
         }
-        for (int j = 0; j < 8; j++) {
-            if (crc.and(mask).signum() != 0) {
-                crc = crc.shiftLeft(1).xor(poly);
-            } else {
-                crc = crc.shiftLeft(1);
+
+        int degree = width - 1;
+        if (degree < 8) {
+            outputArea.append("Polynomial degree < 8, not using lookup table.\n");
+            cachedTable = null;
+            cachedPoly = poly;
+            cachedWidth = width;
+            return null;
+        }
+
+        BigInteger[] table = new BigInteger[256];
+        BigInteger maskFull = BigInteger.ONE.shiftLeft(degree).subtract(BigInteger.ONE);
+        BigInteger polyXor = poly.and(maskFull); // Remove leading bit (x^degree)
+
+        for (int i = 0; i < 256; i++) {
+            BigInteger crc = BigInteger.valueOf(i).shiftLeft(degree - 8).and(maskFull);
+            for (int j = 0; j < 8; j++) {
+                if (crc.testBit(degree - 1)) {
+                    crc = crc.shiftLeft(1).xor(polyXor).and(maskFull);
+                } else {
+                    crc = crc.shiftLeft(1).and(maskFull);
+                }
             }
-            crc = crc.and(max);
+            table[i] = crc;
+            if (i == 80 || i == 208 || i == 219) {
+                outputArea.append(String.format("Table[%d] = %s\n", i, crc.toString(2)));
+            }
         }
-        table[i] = crc;
-    }
-    cachedTable = table;
-    cachedPoly = poly;
-    cachedWidth = width;
-    return table;
+
+        cachedTable = table;
+        cachedPoly = poly;
+        cachedWidth = width;
+        return table;
     }
 
     private void filterInvalidInputsAndAction(int mode) {
-    String divisor = removeWhitespace(divisorField.getText());
-    if (divisor.isEmpty()) {
-        showError("Divisor field is empty.");
-        return;
-    }
-    String data = inputArea.getText().trim();
-    if (data.isEmpty() || data.equals(INPUT_PLACEHOLDER)) {
-        showError("Input field is empty.");
-        return;
-    }
-    if (asciiMode) {
+        String divisor = removeWhitespace(divisorField.getText());
+        if (divisor.isEmpty()) {
+            showError("Divisor field is empty.");
+            return;
+        }
+        String data = inputArea.getText().trim();
+        if (data.isEmpty() || data.equals(INPUT_PLACEHOLDER)) {
+            showError("Input field is empty.");
+            return;
+        }
+        if (asciiMode) {
+            try {
+                data = asciiToBinary(data);
+            } catch (IllegalArgumentException ex) {
+                showError(ex.getMessage());
+                return;
+            }
+        }
+        String binaryData = removeWhitespace(data);
+        if (!binaryData.matches("[01]+")) {
+            showError("Input must be binary (0/1) or use ASCII mode.");
+            return;
+        }
+        if (binaryData.length() > 1_000_000) {
+            showError("Input is too long. Maximum length is 1,000,000 bits.");
+            return;
+        }
+        String selectedCrc = (String) crcTypeCombo.getSelectedItem();
+        int bitWidth;
         try {
-            data = asciiToBinary(data);
+            bitWidth = getCrcBitWidth(selectedCrc);
         } catch (IllegalArgumentException ex) {
             showError(ex.getMessage());
             return;
         }
-    }
-    String binaryData = removeWhitespace(data);
-    if (!binaryData.matches("[01]+")) {
-        showError("Input must be binary (0/1) or use ASCII mode.");
-        return;
-    }
-    if (binaryData.length() > 1_000_000) {
-        showError("Input is too long. Maximum length is 1,000,000 bits.");
-        return;
-    }
-    String selectedCrc = (String) crcTypeCombo.getSelectedItem();
-    int bitWidth;
-    try {
-        bitWidth = getCrcBitWidth(selectedCrc);
-    } catch (IllegalArgumentException ex) {
-        showError(ex.getMessage());
-        return;
-    }
-    String error = validatePoly(divisor, bitWidth);
-    if (!error.isEmpty()) {
-        showError(error);
-        return;
-    }
-    BigInteger poly;
-    try {
-        poly = new BigInteger(divisor, 2);
-    } catch (NumberFormatException ex) {
-        showError("Invalid polynomial: too large for processing.");
-        return;
-    }
-    boolean useLookup = lookupOn.isSelected();
-    outputArea.append(String.format("Selected: %s | Lookup: %s\n", selectedCrc, useLookup ? "ON" : "OFF"));
-    long start = System.nanoTime();
-    if (mode == 1) {
-        try {
-            lastCodeword = useLookup ? encodeLookup(binaryData, poly, bitWidth) : encodeBitwise(binaryData, poly, bitWidth);
-            String remainder = lastCodeword.substring(binaryData.length());
-            long end = System.nanoTime();
-            outputArea.setText("");
-            outputArea.append("Data: " + binaryData + "\n");
-            outputArea.append("Divisor: " + divisor + "\n");
-            outputArea.append("Remainder: " + remainder + "\n");
-            outputArea.append("Codeword: " + lastCodeword + "\n");
-            outputArea.append(String.format("Encode done in %.3f ms\n\n", (end - start) / 1e6));
-            inputArea.setText(lastCodeword);
-        } catch (IllegalArgumentException ex) {
-            showError("Encoding failed: " + ex.getMessage());
-            lastCodeword = "";
+        String error = validatePoly(divisor, bitWidth);
+        if (!error.isEmpty()) {
+            showError(error);
+            return;
         }
-    } else if (mode == 2) {
-        String codeword = removeWhitespace(inputArea.getText());
-        boolean valid = useLookup ? decodeLookup(codeword, poly, bitWidth) : decodeBitwise(codeword, poly, bitWidth);
-        long end = System.nanoTime();
-        outputArea.append("Codeword: " + codeword + "\n");
-        outputArea.append(valid ? "✅ No error.\n" : "❌ Error detected.\n");
-        outputArea.append(String.format("Decode done in %.3f ms\n\n", (end - start) / 1e6));
-    }
+        BigInteger poly;
+        try {
+            poly = new BigInteger(divisor, 2);
+        } catch (NumberFormatException ex) {
+            showError("Invalid polynomial: too large for processing.");
+            return;
+        }
+        boolean useLookup = lookupOn.isSelected();
+        outputArea.setText(""); // Clear outputArea before new operation
+        outputArea.append(String.format("Selected: %s | Lookup: %s\n", selectedCrc, useLookup ? "ON" : "OFF"));
+        long start = System.nanoTime();
+        if (mode == 1) {
+            try {
+                lastCodeword = useLookup ? encodeLookup(binaryData, poly, bitWidth) : encodeBitwise(binaryData, poly, bitWidth);
+                String remainder = lastCodeword.substring(binaryData.length());
+                long end = System.nanoTime();
+                outputArea.append("Data: " + binaryData + "\n");
+                outputArea.append("Divisor: " + divisor + "\n");
+                outputArea.append("Remainder: " + remainder + "\n");
+                outputArea.append("Codeword: " + lastCodeword + "\n");
+                outputArea.append(String.format("Encode done in %.3f ms\n\n", (end - start) / 1e6));
+                inputArea.setText(lastCodeword);
+            } catch (IllegalArgumentException ex) {
+                showError("Encoding failed: " + ex.getMessage());
+                lastCodeword = "";
+            }
+        } else if (mode == 2) {
+            String codeword = removeWhitespace(inputArea.getText());
+            boolean valid = useLookup ? decodeLookup(codeword, poly, bitWidth) : decodeBitwise(codeword, poly, bitWidth);
+            long end = System.nanoTime();
+            outputArea.append("Codeword: " + codeword + "\n");
+            outputArea.append(valid ? "✅ No error.\n" : "❌ Error detected.\n");
+            outputArea.append(String.format("Decode done in %.3f ms\n\n", (end - start) / 1e6));
+        }
     }
 
-    
     // --- GUI & Utility ---
+
     private void simulateError() {
         String data = removeWhitespace(inputArea.getText());
         if (data.isEmpty() || !data.matches("[01]+")) {
@@ -444,7 +502,7 @@ public class CrcGui extends JFrame {
                 if (expectedLength < 2) {
                     return "Custom CRC width must be at least 1.";
                 }
-                if (expectedLength > 128) {  // Arbitrary limit for BigInteger practicality
+                if (expectedLength > 128) {
                     return "Custom CRC width cannot exceed 127.";
                 }
             } catch (NumberFormatException ex) {
@@ -508,23 +566,23 @@ public class CrcGui extends JFrame {
     }
 
     private int getCrcBitWidth(String type) {
-    return switch (type) {
-        case "CRC-8" -> 9;
-        case "CRC-16" -> 17;
-        case "CRC-32" -> 33;
-        case "CRC-64" -> 65;
-        case "Custom CRC" -> {
-            try {
-                int width = Integer.parseInt(customWidthField.getText()) + 1;
-                if (width < 2 || width > 128) {
-                    throw new NumberFormatException("Custom CRC width must be between 1 and 127");
+        return switch (type) {
+            case "CRC-8" -> 9;
+            case "CRC-16" -> 17;
+            case "CRC-32" -> 33;
+            case "CRC-64" -> 65;
+            case "Custom CRC" -> {
+                try {
+                    int width = Integer.parseInt(customWidthField.getText()) + 1;
+                    if (width < 2 || width > 128) {
+                        throw new NumberFormatException("Custom CRC width must be between 1 and 127");
+                    }
+                    yield width;
+                } catch (NumberFormatException ex) {
+                    throw new IllegalArgumentException("Invalid custom CRC width: " + customWidthField.getText());
                 }
-                yield width;
-            } catch (NumberFormatException ex) {
-                throw new IllegalArgumentException("Invalid custom CRC width: " + customWidthField.getText());
             }
-        }
-        default -> throw new IllegalArgumentException("Invalid CRC type: " + type);
+            default -> throw new IllegalArgumentException("Invalid CRC type: " + type);
         };
     }
 
